@@ -110,3 +110,127 @@ class MultiServerMCPClient:
         )
         await session.initialize()
         return session
+    
+    
+    async def chat_base(self, messages: list) -> list:
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=self.all_tools,
+        )
+        
+        if response.choices[0].finish_reason == "tool_calls":
+            while True:
+                messages = await self.create_function_response_message()
+                
+    async def create_function_response_message(self, messages, response):
+        function_call_messages = response.choices[0].message.tool_calls
+        messages.append(response.choices[0].message.model_dump())
+        
+        for function_call_message in function_call_messages:
+            tool_name = function_call_message.function.name
+            tool_args = json.loads(function_call_message.function.arguments)
+            
+            function_response = await self._call_mcp_tool(self, tool_name, tool_args)
+            
+            messages.append(
+                {
+                    "role": "tool",
+                    "content": function_response,
+                    "tool_call_id": function_call_message.id,
+                }
+            )
+        return messages
+    
+    async def process_query(self, user_query: str) -> str:
+        messages = [{"role": "user", "content": user_query}]
+        
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            tools=self.all_tools,           
+        )
+        content=response.choices[0]
+        print(content)
+        print(self.all_tools)
+        
+        if content.finish_reason == "tool_calls":
+            tool_call = content.message.tool_calls[0]
+            tool_name = tool_call.function.name
+            tool_args = json.loads(tool_call.function.arguments)
+            
+            print(f"\n[ 调用工具： {tool_name}, 参数：{tool_args} ]\n")
+            
+            result = await self._call_mcp_tool(tool_name, tool_args)
+            
+            messages.append(content.message.model_dump())
+            messages.append({
+                "role": "tool",
+                "content": result,
+                "tool_call_id": tool_call.id,
+            })
+            
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+            )
+            return response.choices[0].message.content
+        
+        return content.message.content
+            
+            
+            
+    async def _call_mcp_tool(self, tool_full_name: str, tool_args: dict) -> str:
+        
+        parts = tool_full_name.split("_", 1)
+        if len(parts)  != 2:
+            return f"无效的工具名称：{tool_full_name}"
+        
+        server_name, tool_name = parts
+        session = self.sessions.get(server_name)
+        if not session:
+            return f"找不到服务器：{server_name}"
+        
+        
+        resp = await session.call_tool(tool_name, tool_args)
+        print(resp)
+        return resp.content if resp.content else "工具执行无输出"
+    
+    
+    async def chat_loop(self):
+        print("\n 多服务器 MCP + 最新 Function Calling 客户端已启动！输入'quit'退出。 ")
+        messages = []
+        
+        while True:
+            query = input("\n你： ").strip()
+            if query.lower() == "quit":
+                break
+            try:
+                messages.append({"role": "user", "content": query})
+                messages = messages[-20: ]
+                response = await self.chat_base(messages)
+                messages.append(response.choices[0].message.model_dump())
+                result = response.choices[0].message.content
+                
+                print(f"\nDeepSeek: {result}")
+            except Exception as e:
+                print(f"\n 调用过程出错：{e}")
+                
+    async def cleanup(self):
+        await self.exit_stack.aclose()
+
+async def main():
+    servers = {
+        "file": "",
+        "weather": "",
+    }
+    
+    client = MultiServerMCPClient()
+    try:
+        await client.connect_to_server(servers)
+        await client.chat_loop()
+    finally:
+        await client.cleanup()
+        
+if __name__=="__main__":
+    main()
