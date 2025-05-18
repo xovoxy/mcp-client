@@ -42,9 +42,7 @@ class MultiServerMCPClient:
                         "input_schema": tool.inputSchema,
                     }
                 })
-                
         self.all_tools = await self.transform_json(self.all_tools)
-
         print("\n✅ 已连接到下列服务器:")
         for name in servers:
             print(f"    - {name}: {servers[name]}")
@@ -54,7 +52,7 @@ class MultiServerMCPClient:
             print(f"    - {t['function']['name']}")
                 
 
-    async def transform_json(self, json2_data):
+    async def transform_json(self, json2_data) -> list:
         result = []
 
         for item in json2_data:
@@ -63,9 +61,8 @@ class MultiServerMCPClient:
             
             old_func = item["function"]
             
-            if not isinstance(old_func, dict) or "name" not in old_func or "description" not in item:
+            if not isinstance(old_func, dict) or "name" not in old_func or "description" not in old_func:
                 continue
-            
             
             new_func = {
                 "name": old_func["name"],
@@ -80,14 +77,12 @@ class MultiServerMCPClient:
                 new_func["parameters"]["properties"] = old_schema.get("properties", {})
                 new_func["parameters"]["required"] = old_schema.get("required", [])
 
-
             new_item = {
                 "type": item["type"],
                 "function": new_func,
             }
             
             result.append(new_item)
-
         return result
             
 
@@ -106,7 +101,7 @@ class MultiServerMCPClient:
         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
         read_stream, write_stream = stdio_transport
         session = await self.exit_stack.enter_async_context(
-            ClientSession.create(read_stream, write_stream)
+            ClientSession(read_stream, write_stream)
         )
         await session.initialize()
         return session
@@ -121,7 +116,18 @@ class MultiServerMCPClient:
         
         if response.choices[0].finish_reason == "tool_calls":
             while True:
-                messages = await self.create_function_response_message()
+                messages = await self.create_function_response_message(messages, response)
+                print(messages)
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    tools=self.all_tools,
+                )
+                print(response)
+                if response.choices[0].finish_reason != "tool_calls":
+                    break
+        
+        return response
                 
     async def create_function_response_message(self, messages, response):
         function_call_messages = response.choices[0].message.tool_calls
@@ -129,10 +135,10 @@ class MultiServerMCPClient:
         
         for function_call_message in function_call_messages:
             tool_name = function_call_message.function.name
+            print(f'{function_call_message=}')
             tool_args = json.loads(function_call_message.function.arguments)
-            
-            function_response = await self._call_mcp_tool(self, tool_name, tool_args)
-            
+            function_response = await self._call_mcp_tool(tool_name, tool_args)
+            print(f'{function_response=}')
             messages.append(
                 {
                     "role": "tool",
@@ -151,8 +157,6 @@ class MultiServerMCPClient:
             tools=self.all_tools,           
         )
         content=response.choices[0]
-        print(content)
-        print(self.all_tools)
         
         if content.finish_reason == "tool_calls":
             tool_call = content.message.tool_calls[0]
@@ -193,8 +197,7 @@ class MultiServerMCPClient:
         
         
         resp = await session.call_tool(tool_name, tool_args)
-        print(resp)
-        return resp.content if resp.content else "工具执行无输出"
+        return resp.content[0].text if resp.content else "工具执行无输出"
     
     
     async def chat_loop(self):
@@ -221,8 +224,7 @@ class MultiServerMCPClient:
 
 async def main():
     servers = {
-        "file": "",
-        "weather": "",
+        "file": "../mcp-server-demo/main.py",
     }
     
     client = MultiServerMCPClient()
@@ -233,4 +235,4 @@ async def main():
         await client.cleanup()
         
 if __name__=="__main__":
-    main()
+    asyncio.run(main())
